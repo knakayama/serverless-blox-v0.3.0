@@ -1,0 +1,11 @@
+{
+  "name": "blox",
+  "version": "0.0.1",
+  "main": "index.js",
+  "author": "knakayama <knakayama.sh@gmail.com>",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "aws-sdk": "^2.92.0",
+    "aws4": "^1.6.0"
+  }
+}

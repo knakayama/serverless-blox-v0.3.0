@@ -1,0 +1,7 @@
+stage: v1
+logGroup:
+  retentionInDays: 90
+clusterInstance:
+  imageId: ami-e4657283
+  instanceType: t2.micro
+  keyName: my-key

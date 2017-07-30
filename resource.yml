@@ -1,0 +1,436 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Template to deploy Blox framework on AWS
+
+Parameters:
+  ClusterInstanceImageId:
+    Type: AWS::EC2::Image::Id
+    Default: ${self:custom.config.clusterInstance.imageId}
+  ClusterInstanceInstanceType:
+    Type: String
+    Default: ${self:custom.config.clusterInstance.instanceType}
+  ClusterInstanceKeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: ${self:custom.config.clusterInstance.keyName}
+  ClusterName:
+    Type: String
+    Default: blox
+  QueueName:
+    Type: String
+    Default: blox_queue
+  LogGroupRetentionInDays:
+    Type: Number
+    Default: ${self:custom.config.logGroup.retentionInDays}
+
+Resources:
+  BloxLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays:
+        Ref: LogGroupRetentionInDays
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs:
+              Ref: "AWS::Region"
+      VpcId:
+        Ref: Vpc
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs:
+              Ref: "AWS::Region"
+      VpcId:
+        Ref: Vpc
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: Vpc
+      InternetGatewayId:
+        Ref: InternetGateway
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: Vpc
+  PublicRoute:
+    DependsOn: AttachInternetGateway
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+  AttachSubnet1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: Subnet1
+      RouteTableId:
+        Ref: RouteTable
+  AttachSubnet2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: Subnet2
+      RouteTableId:
+        Ref: RouteTable
+
+  IamRoleLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda Security Group
+      VpcId:
+        Ref: Vpc
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Load Balancer Security Group
+      VpcId:
+        Ref: Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          SourceSecurityGroupId:
+            Ref: LambdaSecurityGroup
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name:
+        Fn::Join: [ "-", [ Ref: ClusterName, LoadBalancer ] ]
+      Scheme: internal
+      SecurityGroups:
+        - Ref: LoadBalancerSecurityGroup
+      Subnets:
+        - Ref: Subnet1
+        - Ref: Subnet2
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Protocol: HTTP
+      Port: 80
+      LoadBalancerArn:
+        Ref: LoadBalancer
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: TargetGroup
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name:
+        Fn::Join: [ "-", [ Ref: ClusterName, TargetGroup ] ]
+      VpcId:
+        Ref: Vpc
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: /v1/ping
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+
+  ClusterInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Cluster Instance Security Group
+      VpcId:
+        Ref: Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          SourceSecurityGroupId:
+            Ref: LoadBalancerSecurityGroup
+        - IpProtocol: tcp
+          ToPort: 80
+          FromPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          ToPort: 22
+          FromPort: 22
+          CidrIp: 0.0.0.0/0
+  IamRoleInstance:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - Ref: IamRoleInstance
+  Instance:
+    DependsOn: Cluster
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId:
+        Ref: ClusterInstanceImageId
+      KeyName:
+        Ref: ClusterInstanceKeyName
+      InstanceType:
+        Ref: ClusterInstanceInstanceType
+      SubnetId:
+        Ref: Subnet1
+      IamInstanceProfile:
+        Ref: InstanceProfile
+      SecurityGroupIds:
+        - Ref: ClusterInstanceSecurityGroup
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - ""
+            - - "#!/bin/bash\n"
+              - "echo ECS_CLUSTER="
+              - Ref: ClusterName
+              - ">> /etc/ecs/ecs.config"
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName:
+        Ref: ClusterName
+
+  IamRoleTask:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName:
+            Fn::Join: [ "-", [ Ref: ClusterName, TaskPolicy ] ]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeClusters
+                  - ecs:DescribeContainerInstances
+                  - ecs:DescribeTaskDefinition
+                  - ecs:DescribeTasks
+                  - ecs:ListClusters
+                  - ecs:ListContainerInstances
+                  - ecs:ListTasks
+                  - ecs:StartTask
+                  - ecs:StopTask
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:ReceiveMessage
+                Resource:
+                  Fn::GetAtt: [ Queue, Arn ]
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: BloxFramework
+      TaskRoleArn:
+        Fn::GetAtt: [ IamRoleTask, Arn ]
+      Volumes:
+        - Name: etcd-state
+          Host:
+            SourcePath: /var/lib/etcd
+      ContainerDefinitions:
+        - Name: scheduler
+          Hostname: scheduler
+          Image: bloxoss/daemon-scheduler:0.3.0
+          Memory: 128
+          PortMappings:
+            - ContainerPort: 2000
+          Environment:
+            - Name: AWS_REGION
+              Value:
+                Ref: "AWS::Region"
+          Command:
+            - --bind
+            - 0.0.0.0:2000
+            - --css-endpoint
+            - css:3000
+            - --etcd-endpoint
+            - etcd:2379
+          Links:
+            - css
+            - etcd
+          Essential: false
+        - Name: css
+          Hostname: css
+          Image: bloxoss/cluster-state-service:0.3.0
+          Memory: 128
+          Environment:
+            - Name: AWS_REGION
+              Value:
+                Ref: "AWS::Region"
+          Command:
+            - --bind
+            - 0.0.0.0:3000
+            - --etcd-endpoint
+            - etcd:2379
+            - --queue
+            - Ref: QueueName
+          Links:
+            - etcd
+          Essential: false
+        - Name: etcd
+          Hostname: etcd
+          Image: quay.io/coreos/etcd:v3.0.15
+          Memory: 256
+          Environment:
+            - Name: ETCDCTL_API
+              Value: 3
+          Command:
+            - /usr/local/bin/etcd
+            - --data-dir
+            - /var/lib/etcd/data
+            - --wal-dir
+            - /var/lib/etcd/wal
+            - --listen-client-urls
+            - http://0.0.0.0:2379
+            - --advertise-client-urls
+            - http://0.0.0.0:2379
+            - --listen-peer-urls
+            - http://0.0.0.0:2380
+          MountPoints:
+            - SourceVolume: etcd-state
+              ContainerPath: /var/lib/etcd
+          Essential: true
+
+  IamRoleService:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+  Service:
+    DependsOn:
+      - LoadBalancer
+      - LoadBalancerListener
+      - TargetGroup
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster:
+        Ref: ClusterName
+      DesiredCount: 1
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      LoadBalancers:
+        - TargetGroupArn:
+            Ref: TargetGroup
+          ContainerPort: 2000
+          ContainerName: scheduler
+      Role:
+        Fn::GetAtt: [ IamRoleService, Arn ]
+      TaskDefinition:
+        Ref: TaskDefinition
+
+  CloudWatchEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: CloudWatch ECS events
+      Name:
+        Fn::Join: [ "", [ Ref: ClusterName, Events ] ]
+      EventPattern:
+        source:
+          - aws.ecs
+        detail-type:
+          - ECS Task State Change
+          - ECS Container Instance State Change
+      Targets:
+        - Arn:
+            Fn::GetAtt: [ Queue, Arn ]
+          Id: SQSTarget
+  Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName:
+        Ref: QueueName
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - Ref: Queue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id:
+          Fn::Join:
+            - ""
+            - - Fn::GetAtt: [ Queue, Arn ]
+              - /SQSDefaultPolicy
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: sqs:SendMessage
+            Resource:
+              Fn::GetAtt: [ Queue, Arn ]
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  Fn::GetAtt: [ CloudWatchEvents, Arn ]
